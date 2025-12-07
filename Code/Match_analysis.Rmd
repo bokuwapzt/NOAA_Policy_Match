@@ -1,0 +1,543 @@
+---
+title: "Match Analysis Between Policies and NOAA Event Data"
+output: html_notebook
+---
+
+
+
+```{r}
+library(data.table)
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(maps)
+
+policy_full    <- readRDS("E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge/ClaimPolicy_FL_join.rds")
+lat_lon_match  <- readRDS("E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge2/lat_lon_merge/lat_lon_match_new.rds")
+no_lat_lon_match <- readRDS("E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge2/no_lat_lon_merge/no_lat_lon_match_new.rds")
+total_match    <- readRDS("E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge2/total_new.rds")
+
+setDT(policy_full)
+setDT(lat_lon_match)
+setDT(no_lat_lon_match)
+setDT(total_match)
+```
+
+
+***<span style="font-size:15pt;">Flood-event selection:</span>***
+
+The following event types are selected: Flood, Flash Flood, Coastal Flood, Storm Surge/Tide, Heavy Rain, Tropical Depression, Tropical Storm, Hurricane (Typhoon), Hurricane, and Debris Flow. 
+
+**With** latitude/longitude information:
+Debris Flow (1, 0.036%), Flash Flood (786, 28.26%), Flood (855, 30.744%), Heavy Rain (1,139, 40.96%).
+
+Total: 2,781 records.
+
+**Without** latitude/longitude information:
+Coastal Flood (273, 21.513%), Hurricane (74, 5.83%), Hurricane (Typhoon) (8, 0.63%), Storm Surge/Tide (157, 12.372%), Tropical Depression (94, 7.40%), Tropical Storm (663, 52.255%).
+
+Total: 1,269 records.
+
+A single flood event in the policy table may correspond to multiple hazard types in the NOAA event dataset.
+For example, Hurricane Michael appears in policy records (floodEvent=Hurricane Michael) may generate several distinct entries in NOAA event table, such as: Hurricane, Tropical Storm, Storm Surge/Tide, Coastal Flood
+
+
+***<span style="font-size:15pt;">Match mechanism:</span>***
+
+```{r}
+## total number of affected policies from lat/lon match: 3,171,600
+length(unique(lat_lon_match$PropertyPolicyID))
+
+## total number of affected policies from no lat/lon match: 5,969,009
+length(unique(no_lat_lon_match$PropertyPolicyID))
+
+## 5,969,009 + 3,171,600 - 8,178,303 = 962,306 affected policies show in both match methods
+## (but corresponding to different events)
+total_policy_num  <- length(unique(policy_full$PropertyPolicyID))    # total number of policies: 18,337,618
+affected_policy_num <- length(unique(total_match$PropertyPolicyID))  # total affected policies: 8,178,303
+## about 44.6% of policies were affected
+
+## total number of policies that have a loss: 97,740
+total_policy_num_with_claim <- length(policy_full[!is.na(LossDate), unique(PropertyPolicyID)])
+
+## affected PropertyPolicyID
+ids_exposed   <- unique(total_match$PropertyPolicyID)
+exposed_pols  <- policy_full[PropertyPolicyID %in% ids_exposed]  # affected policy records
+
+## number of affected policies with loss: 62,844
+## about 64.297% of policies with a loss can find a corresponding flood event
+n_unique_claim_exposed <- exposed_pols[!is.na(LossDate), uniqueN(PropertyPolicyID)]
+
+## total PropertyPolicyID with a loss
+claim_ids <- policy_full[!is.na(LossDate), unique(PropertyPolicyID)]
+
+## PropertyPolicyID with a loss, but no matched event (by total_match)
+claim_not_exposed <- setdiff(claim_ids, ids_exposed)
+
+lat_lon_match[
+  , .N, by = EVENT_TYPE
+][
+  , proportion := N / sum(N)
+][order(-proportion)]#For lat/lon match, 0.83953885 by Heavy Rain; 0.13220787 by Flood; 0.02825328 by Flash Flood
+no_lat_lon_match[
+  , .N, by = EVENT_TYPE
+][
+  , proportion := N / sum(N)
+][order(-proportion)]#For no lat/lon match, 0.34 by Tropical Storm; 0.295679963 by Coastal Flood; 0.2144170946 by Tropical Depression; 0.111 by Storm Surge/Tide. Both type of hurricanes less than 0.05
+
+## with a loss, but no matched event (full records)
+unmatched_claim_rows <- policy_full[
+  PropertyPolicyID %in% claim_not_exposed &
+    !is.na(LossDate)
+]
+sum(
+  unmatched_claim_rows$amountPaidOnBuildingClaim +
+    unmatched_claim_rows$amountPaidOnContentsClaim +
+    unmatched_claim_rows$amountPaidOnIncreasedCostOfComplianceClaim == 0,
+  na.rm = TRUE
+)#Only 2812 of them have 0 payment
+summary( unmatched_claim_rows$amountPaidOnBuildingClaim +
+           unmatched_claim_rows$amountPaidOnContentsClaim +
+           unmatched_claim_rows$amountPaidOnIncreasedCostOfComplianceClaim)# They can not be thrown away
+```
+
+
+The zone-based events affect 5,969,009 policies, while the lat/lon-based events affect 3,171,600 policies, with 962,306 policies appearing in both but matched to different event types. 
+
+Among the lat/lon-based matches, 83.954% correspond to Heavy Rain, 13.22% to Flood, and the remainder to Flash Flood.
+
+The zone-based matches are: Tropical Storm events (34%), followed by Coastal Flood (29.568%), Tropical Depression (21.44%), and Storm Surge/Tide (11.1%), with both hurricane categories accounting for less than 5%.
+
+Among the 34,896 claimed policies with no matched event, only 2,812 have a total payment of zero. For those with positive payouts, the distribution ranges widely, with a first quartile of 5,719 and a third quartile of 79,090. This shows substantial variability but remaining non-negligible in terms of payment amount.
+
+
+***<span style="font-size:15pt;">Potential Reasons for Unmatched Claim Records: </span>***
+
+```{r}
+## 50 PropertyPolicyID with no match due to lack of lat/lon in properties
+unmatched_claim_rows[is.na(latitude), uniqueN(PropertyPolicyID)]
+
+## with a loss and lon/lat info, but no matched event (full records)
+unmatched_claim_rows_clean <- policy_full[
+  PropertyPolicyID %in% claim_not_exposed &
+    !is.na(LossDate) &
+    !is.na(latitude)
+]
+
+## Convert to sf points (unmatched policies with loss + coordinates)
+unmatched_sf <- st_as_sf(
+  unmatched_claim_rows_clean,
+  coords = c("longitude", "latitude"),
+  crs    = 4326
+)
+```
+
+Among the 18,337,618 policies in the Florida portfolio, 97,740 have at least one loss/claim recorded in LossDate. Our exposure merge links 62,844 of these claim policies to at least one flood-related event (≈64.3%), leaving 34,896 claim policies without any matched event. 
+
+A small portion of this gap is because 50 unmatched claim policies lack latitude/longitude information, so they cannot be matched using any spatial method. For the remaining policies with coordinates, the mismatch appears to arise from limitations in the NOAA event and PFZ datasets rather than from the matching logic itself. 
+
+
+```{r}
+#below is for no lat/lon (Zone based)
+zones_fl_needed <- st_read(
+  "E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge/storm data/geo data/z_18mr25.shp"
+) %>%
+  filter(STATE == "FL") %>%              # Florida only
+  select(ZONE, geometry) %>%
+  na.omit() %>%
+  mutate(ZONE = as.integer(ZONE)) %>%
+  st_transform(4326) %>%                 # transform NAD83 → WGS84
+  group_by(ZONE) %>%                     # we may have different geometry with the same ZONE, so take the union
+  summarise(
+    geometry = st_union(geometry),
+    .groups = "drop"
+  )                                      # Public Forecast Zones
+
+storm_no_lat_lon <- fread(
+  "E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge2/Storm info/storm_no_lat_lon.csv"
+)[
+  , .(EVENT_ID, EVENT_TYPE,
+      BEGIN_DATE_TIME, END_DATE_TIME,
+      CZ_FIPS)
+]
+
+## ensure CZ_FIPS is integer
+storm_no_lat_lon[, CZ_FIPS := as.integer(CZ_FIPS)]
+
+## zones used by events
+zones_selected <- zones_fl_needed[
+  zones_fl_needed$ZONE %in% unique(storm_no_lat_lon$CZ_FIPS),
+]
+
+## spatial join: among those with loss but unmatched records, whether they fall in any of the event zones
+joined_sf <- st_join(
+  unmatched_sf,
+  zones_selected["ZONE"],
+  join = st_intersects
+)
+
+## 29,012 of unmatched but with loss records do not fall into any of the event zones
+length(unique(joined_sf$PropertyPolicyID[is.na(joined_sf$ZONE)]))
+
+## subset: unmatched but with loss records that did not fall into any of the event zones
+joined_na_sf <- joined_sf[is.na(joined_sf$ZONE), ]
+coords       <- st_coordinates(joined_na_sf)
+joined_na_df <- data.frame(
+  st_drop_geometry(joined_na_sf),
+  longitude = coords[, "X"],
+  latitude  = coords[, "Y"]
+)
+
+
+
+fl_map <- map_data("state", region = "florida")
+
+ggplot() +
+  geom_polygon(
+    data  = fl_map,
+    aes(x = long, y = lat, group = group),
+    fill  = NA,
+    color = "grey60"
+  ) +
+  geom_density2d_filled(
+    data = joined_na_df,
+    aes(x = longitude, y = latitude),
+    contour_var = "ndensity",
+    alpha       = 0.7
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal()# Plot: density of unmatched under zone-based method
+
+
+```
+
+
+Under the zone-based (PFZ) method, we overlay unmatched claim locations onto the set of NWS Public Forecast Zones associated with flood-related events. In this setup, 29,012 claim policies with valid coordinates fall outside all PFZ event zones—even before considering timing. The accompanying density plot illustrates where these unmatched claims concentrate spatially. Dark purple shading indicates areas with few or no unmatched points, while the brighter green and yellow regions represent areas with the highest densities of unmatched policies. These hotspots appear almost exclusively along the coastline, particularly in southwest Florida. This pattern reflects an important limitation of the PFZ method: PFZ land polygons are administrative forecast units rather than precise representations of the physical coastline. As a result, many coastal neighborhoods lie outside PFZ land boundaries and therefore never intersect the PFZ polygons used for matching.
+
+
+
+```{r}
+#below is for lat/lon 
+storm_with_lat_lon <- read.csv(
+  "E:/迅雷云盘/笔记本/laptop-E/graduate/25 fall/RA/data merge2/Storm info/storm_lat_lon.csv"
+)
+
+storm_with_lat_lon <- storm_with_lat_lon %>%
+  select(
+    EVENT_ID, EVENT_TYPE,
+    BEGIN_DATE_TIME, END_DATE_TIME,
+    BEGIN_LAT, BEGIN_LON, END_LAT, END_LON
+  )
+
+## buffer radius by event type (in meters)
+radius_by_type <- function(event_type) {
+  et <- tolower(trimws(event_type))
+  if (et == "debris flow") return(200)
+  if (et == "flash flood") return(1000)
+  if (et == "flood")       return(2000)
+  if (et == "heavy rain")  return(10000)
+}
+
+df <- storm_with_lat_lon %>%
+  mutate(
+    BEGIN_LON = as.numeric(BEGIN_LON),
+    BEGIN_LAT = as.numeric(BEGIN_LAT),
+    END_LON   = as.numeric(END_LON),
+    END_LAT   = as.numeric(END_LAT)
+  )
+
+## Build one geometry per row.
+## If start == end → POINT.
+## Else → LINESTRING from start to end. Returns sfg objects.
+make_geom <- function(r) {
+  p1 <- c(r$BEGIN_LON, r$BEGIN_LAT)
+  p2 <- c(r$END_LON,   r$END_LAT)
+  
+  if (any(is.na(c(p1, p2)))) {
+    # Return an empty sfg geometry
+    return(st_geometrycollection())
+  }
+  if (isTRUE(all.equal(p1, p2))) {
+    # Return the sfg geometry
+    st_point(p1)
+  } else {
+    # Return the sfg geometry
+    st_linestring(rbind(p1, p2))
+  }
+}
+
+## Wrap the list of sfg into an sfc with CRS EPSG:4326 (WGS84 lon/lat)
+geoms <- lapply(seq_len(nrow(df)), function(i) make_geom(df[i, ]))
+
+## Combine attributes + geometry into an sf data frame g
+g <- st_sf(df, geom = st_sfc(geoms, crs = 4326))
+
+## For each event row, create a buffered polygon around point/line
+##  - 4326 (lat/lon) -> 5070 (meters)
+##  - buffer in meters
+##  - back to 4326 (lat/lon)
+##  - drop original geom, keep affected_poly
+buffer_row <- function(i) {
+  row      <- g[i, ]
+  r_m      <- radius_by_type(row$EVENT_TYPE)
+  geom_conus <- st_transform(row$geom, 5070)
+  buf_conus  <- st_buffer(geom_conus, dist = r_m)
+  buf_4326   <- st_transform(buf_conus, 4326)
+  
+  st_sf(st_drop_geometry(row), affected_poly = st_geometry(buf_4326))
+}
+
+affected_list <- lapply(seq_len(nrow(g)), buffer_row)
+
+## create polygon records for events with lat/lon (buffered footprints)
+affected <- do.call(rbind, affected_list)
+
+
+
+## we want to know among those with loss but unmatched records,
+## whether they fall in any of the lat/lon-buffered event polygons
+joined_sf2 <- st_join(unmatched_sf, affected["EVENT_ID"], join = st_intersects)
+
+joined2_dt <- as.data.table(st_drop_geometry(joined_sf2))
+
+## 14,015 of unmatched but with loss records did not fall into any of the event polygons
+joined2_dt[is.na(EVENT_ID), uniqueN(PropertyPolicyID)]
+
+## subset: unmatched but with loss records that did not fall into any of the event polygons
+joined_na_sf2 <- joined_sf2[is.na(joined_sf2$EVENT_ID), ]
+coords2       <- st_coordinates(joined_na_sf2)
+joined_na_df2 <- data.frame(
+  st_drop_geometry(joined_na_sf2),
+  longitude = coords2[, "X"],
+  latitude  = coords2[, "Y"]
+)
+
+ggplot() +
+  geom_polygon(
+    data  = fl_map,
+    aes(x = long, y = lat, group = group),
+    fill  = NA,
+    color = "grey60"
+  ) +
+  geom_density2d_filled(
+    data = joined_na_df2,
+    aes(x = longitude, y = latitude),
+    contour_var = "ndensity",
+    alpha       = 0.7
+  ) +
+  coord_fixed(1.3) +
+  theme_minimal()# Plot: density of unmatched under lat/lon buffer method
+```
+
+Switching to the lat/lon-buffered event polygons substantially improves spatial coverage: the number of claim policies that still fail to intersect any event footprint decreases to 14,015. The density map for this case shows remaining unmatched policies clustered around the Fort Myers / Cape Coral region in southwest Florida. A possible explanation is that some relevant hazard events may not be represented in the NOAA Storm Events dataset. In such cases, no corresponding event polygon would be available for the spatial matching algorithm to intersect, even though a claim was filed.
+
+
+***<span style="font-size:15pt;">Footprints for 2 Match Methods: </span>***
+
+```{r}
+#below is for footprints of 2 match methods
+# IDs that have both types of matches
+ids_both <- total_match[
+  , .(has_lat = any(lat_lon == 1),
+      has_no_lat = any(lat_lon == 0)),
+  by = PropertyPolicyID
+][has_lat & has_no_lat, PropertyPolicyID]
+
+policy_event_count_both_types <- total_match[
+  PropertyPolicyID %in% ids_both,
+  .N,
+  by = PropertyPolicyID
+][order(-N)]
+this_pol <- total_match[PropertyPolicyID == "P2380050D20110808"]#Choose policy: P2380050D20110808,latitude=30.4,longitude =-84.3, with 29 events matched,from both lat/lon and zone based,28 of them are heavy rain and 1 is Tropical Storm (CZ_FIPS=17)
+# Heavy Rain event IDs (lat_lon = 1)
+hr_event_ids <- this_pol[EVENT_TYPE == "Heavy Rain" & lat_lon == 1, unique(EVENT_ID)]
+# Tropical Storm event ID (lat_lon = 0)
+ts_event_id  <- this_pol[EVENT_TYPE == "Tropical Storm" & lat_lon == 0, unique(EVENT_ID)]
+affected_hr <- affected[affected$EVENT_ID %in% hr_event_ids, ]
+affected_hr_union <- st_union(affected_hr$affected_poly)
+zone_ts <- zones_selected[zones_selected$ZONE == 17, ]
+policy_point <- st_sfc(
+  st_point(c(-84.3, 30.4)),   # (lon, lat)
+  crs = 4326
+)
+policy_point_sf <- st_sf(
+  PropertyPolicyID = "P2380050D20110808",
+  geometry = policy_point
+)
+
+this_pol2 <- total_match[PropertyPolicyID == "P0017117D20201020"]#Choose policy: P0017117D20201020,latitude=30.2,longitude =-85.6, with 2 events matched,from both lat/lon and zone based,1 of them is heavy rain and 1 is Tropical Storm (CZ_FIPS=112)
+# Heavy Rain event IDs (lat_lon = 1)
+hr_event_ids2 <- this_pol2[EVENT_TYPE == "Heavy Rain" & lat_lon == 1, unique(EVENT_ID)]
+# Tropical Storm event ID (lat_lon = 0)
+ts_event_id2  <- this_pol2[EVENT_TYPE == "Tropical Storm" & lat_lon == 0, unique(EVENT_ID)]
+affected_hr2 <- affected[affected$EVENT_ID %in% hr_event_ids2, ]
+affected_hr_union2 <- st_union(affected_hr2$affected_poly)
+zone_ts2 <- zones_selected[zones_selected$ZONE == 112, ]
+policy_point2 <- st_sfc(
+  st_point(c(-85.6, 30.2)),   # (lon, lat)
+  crs = 4326
+)
+policy_point_sf2 <- st_sf(
+  PropertyPolicyID = "P0017117D20201020",
+  geometry = policy_point2
+)
+
+this_pol3 <- total_match[PropertyPolicyID == "P1461881D20201022"]#Choose policy: P1461881D20201022,latitude=30.4,longitude =-81.6, with 5 events matched,from both lat/lon and zone based,4 of them are heavy rain and 1 is Tropical Storm (CZ_FIPS=125)
+# Heavy Rain event IDs (lat_lon = 1)
+hr_event_ids3 <- this_pol3[EVENT_TYPE == "Heavy Rain" & lat_lon == 1, unique(EVENT_ID)]
+# Tropical Storm event ID (lat_lon = 0)
+ts_event_id3  <- this_pol3[EVENT_TYPE == "Tropical Storm" & lat_lon == 0, unique(EVENT_ID)]
+affected_hr3 <- affected[affected$EVENT_ID %in% hr_event_ids3, ]
+affected_hr_union3 <- st_union(affected_hr3$affected_poly)
+zone_ts3 <- zones_selected[zones_selected$ZONE == 125, ]
+policy_point3 <- st_sfc(
+  st_point(c(-81.6, 30.4)),   # (lon, lat)
+  crs = 4326
+)
+policy_point_sf3 <- st_sf(
+  PropertyPolicyID = "P1461881D20201022",
+  geometry = policy_point3
+)
+
+
+
+ggplot() +
+  # Florida outline as background
+  geom_polygon(
+    data  = fl_map,
+    aes(x = long, y = lat, group = group),
+    fill  = NA,
+    color = "grey70"
+  ) +
+  
+  # PFZ zones in red
+  geom_sf(data = zone_ts,  fill = NA, color = "red", linewidth = 0.7, inherit.aes = FALSE) +
+  geom_sf(data = zone_ts2, fill = NA, color = "red", linewidth = 0.7, inherit.aes = FALSE) +
+  geom_sf(data = zone_ts3, fill = NA, color = "red", linewidth = 0.7, inherit.aes = FALSE) +
+  
+  # Heavy Rain buffered footprints in blue
+  geom_sf(data = affected_hr_union,  fill = NA, color = "blue", linewidth = 0.6, inherit.aes = FALSE) +
+  geom_sf(data = affected_hr_union2, fill = NA, color = "blue", linewidth = 0.6, inherit.aes = FALSE) +
+  geom_sf(data = affected_hr_union3, fill = NA, color = "blue", linewidth = 0.6, inherit.aes = FALSE) +
+  
+  # Property points in black
+  geom_sf(data = policy_point_sf,  color = "black", size = 2, inherit.aes = FALSE) +
+  geom_sf(data = policy_point_sf2, color = "black", size = 2, inherit.aes = FALSE) +
+  geom_sf(data = policy_point_sf3, color = "black", size = 2, inherit.aes = FALSE) +
+  
+  # Florida bounding box
+  coord_sf(
+    xlim = c(-88, -80),
+    ylim = c(24, 31)
+  ) +
+  
+  labs(
+    title    = "Exposure Footprints for Three Selected Policies",
+    subtitle = "Red = PFZ zones | Blue = Heavy Rain buffers | Black = property locations",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal()
+```
+
+To illustrate how the two matching mechanisms differ, we selected three policies that match under both methods and plotted their corresponding PFZ zones and lat/lon-buffered footprints. In the plot, the black dot marks the property location, the red line outlines the PFZ boundary, and the blue line represents the lat/lon-buffered area. In all three examples, the PFZ zones are substantially larger and more irregular, especially along the coast, while the lat/lon-based footprints are compact and highly localized. This helps explain why the PFZ method produces a greater number of matches: PFZ zones represent broad administrative regions rather than physical hazard footprints, resulting in much wider spatial coverage.
+
+
+
+
+
+***<span style="font-size:15pt;">Distributional Patterns of Policy–Event Matches: </span>***
+
+
+```{r}
+policy_event_counts <- total_match[
+  , .(num_events = .N),
+  by = PropertyPolicyID
+][order(-num_events)]
+event_summary <- policy_event_counts[
+  , .(num_policies = .N),
+  by = num_events
+][
+  order(num_events)
+][
+  , proportion := num_policies / sum(num_policies)
+][
+  , percent := round(proportion * 100, 2)
+]
+
+event_summary#most of affected policies (about 50%) only have 1 event. with over 90% (91.75%) are affected less or equal than 5 events
+ggplot(policy_event_counts, aes(x = num_events)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Number of Matched Events per Policy",
+    x = "Number of matched events",
+    y = "Count"
+  ) +
+  theme_minimal()#histogram of number of matched events for each policy
+```
+```{r}
+event_summary
+```
+
+About half (49.0%) of affected policies are matched to exactly one event. Roughly 91.8% of policies are matched to five or fewer events. Very few policies are matched to more than 10 events, and policies matched to 20+ events are essentially negligible in proportion. So from the policy point of view, : most policies only intersect a small number of hazard footprints, with a thin right tail of repeatedly exposed locations. 
+
+
+```{r}
+event_policy_counts <- total_match[
+  , .(num_policies = .N),
+  by = EVENT_ID
+][order(-num_policies)]
+policy_summary <- event_policy_counts[
+  , .(num_events = .N),
+  by = num_policies
+][
+  order(num_policies)
+][
+  , proportion :=  num_events / sum(num_events)
+][
+  , percent := round(proportion * 100, 2)
+]
+ggplot(event_policy_counts, aes(x = num_policies)) +
+  geom_histogram(binwidth = 100, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Number of Policies Exposed per Event",
+    x = "Number of policies exposed",
+    y = "Number of events"
+  ) +
+  theme_minimal()#histogram of number of policies for each event
+```
+
+```{r}
+policy_summary
+```
+
+For the number of policies exposed per event, the result shows great variability among different events. Many events expose only a handful of policies—ranging from one to several thousand—which is characteristic of localized Heavy Rain or small-scale flood events. As the number of exposed policies increases, the frequency of such events declines rapidly, producing a strongly right-skewed distribution. However, the tail is very long: a moderate number of events expose tens of thousands of policies. At the extreme end, a small group of large PFZ-based Tropical Storm and Hurricane events expose more than 100,000 policies each, with the largest event reaching approximately 205,000 exposures. Although these large events occur infrequently, they account for a substantial share of total policy exposure.
+
+***<span style="font-size:15pt;">Conditional Match Rates Under the Two Methods: </span>***
+
+```{r}
+n_both_with_loss <- policy_full[
+  PropertyPolicyID %in% ids_both & !is.na(LossDate),
+  uniqueN(PropertyPolicyID)
+]# number of policies that are in ids_both AND have non-missing LossDate (5782); 5782/962306=0.006 of policies captured by both have loss
+
+ids_lat_all <- lat_lon_match[, unique(PropertyPolicyID)]# all policies that appear in lat_lon_match
+ids_lat_only <- setdiff(ids_lat_all, ids_both)# those that ONLY appear in lat_lon_match (not in ids_both)
+n_lat_only <- length(ids_lat_only)#2209294 policies captured only through lat/lon
+n_lat_only_with_loss <- policy_full[
+  PropertyPolicyID %in% ids_lat_only & !is.na(LossDate),
+  uniqueN(PropertyPolicyID)
+]#10640 of policies captured only through lat/lon have loss; 0.004816
+
+ids_zone_all <- no_lat_lon_match[, unique(PropertyPolicyID)]# all policies that appear in no_lat_lon_match (zone-based)
+ids_zone_only <- setdiff(ids_zone_all, ids_both)# those that ONLY appear in zone-based match
+n_zone_only <- length(ids_zone_only)#5006703 policies captured only through zone
+n_zone_only_with_loss <- policy_full[
+  PropertyPolicyID %in% ids_zone_only & !is.na(LossDate),
+  uniqueN(PropertyPolicyID)
+]#46422 of policies captured only through zone have loss; 0.00927197
+```
+
+Across the full portfolio, only 0.53% of all policies ever file a loss, while among policies classified as affected (by either mechanism), the loss rate rises to 0.77%.
+
+When we break this down by exposure method, clear differences emerge. Policies captured only by the PFZ zone–based method exhibit the highest loss rate at 0.93%, reflecting the fact that the PFZ-only set is dominated by Tropical Storm, Hurricane, Storm Surge/Tide, and Coastal Flood events—large, coastal, and often damaging systems. Policies captured only through the lat/lon-based buffer method have a substantially lower loss rate of 0.48%, consistent with these exposures being driven mostly by localized events that do not always translate into property-level damage. Policies captured by both methods fall in between, with a loss rate of 0.60%. This group is actually a mixture of properties located within large PFZ storm footprints and areas intersected by local event buffers. Being tagged by both mechanisms reflects frequent but often moderate rainfall exposure rather than exclusively high-intensity events, which pulls the loss rate toward the overall rate. 
